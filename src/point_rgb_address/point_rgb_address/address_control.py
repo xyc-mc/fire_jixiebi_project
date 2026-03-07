@@ -3,7 +3,6 @@ from rclpy.node import Node
 from base_msgs.msg import ControlMsg
 from .segment_balanced import *
 import os
-from sensor_msgs.msg import PointCloud2, PointField, Image
 from std_msgs.msg import String
 import numpy as np
 from .centralized_computing import *
@@ -25,6 +24,7 @@ class AddressControl(Node):
         self.newpcd_path = os.path.join(self.results_dir, 'target_0_balanced.pcd')
         self.match_result_path = os.path.join(self.results_dir, 'match_result.jpg')
         self.template_img_path = os.path.join(self.workspace_dir, 'src/point_rgb_address/config/master_aligned.jpg')
+        self.segment_rgb_data_path = os.path.join(self.workspace_dir, 'src/point_rgb_address/camera_data/segment_rgb.jpg')
 
         self.control_pub = self.create_publisher(ControlMsg, '/sport_control', 10)
         self.control_sub = self.create_subscription(ControlMsg, '/address_control', self.address_callback, 10)
@@ -34,9 +34,7 @@ class AddressControl(Node):
         self.process_pub = self.create_publisher(String, '/process_data', 10)
         self.error_pub = self.create_publisher(String, '/error_data', 10)
 
-        self.segment_rgb_data_path = os.path.join(self.workspace_dir, 'src/point_rgb_address/camera_data/segment_rgb.jpg')
-
-
+        
     def address_callback(self, data):
         try:
             process = String()
@@ -53,24 +51,22 @@ class AddressControl(Node):
                 segmentor = BalancedPointCloudSegmentor(self.model_path)
                     
                 results = segmentor.segment_balanced(
-                    rgb_data=None,      # 传入图像数据
-                    pcd_data=None,     # 传入点云数据
                     rgb_path=self.rgb_path,
                     pcd_path=self.pcd_path,
                     output_dir=self.results_dir,
                     conf_threshold=0.7,
                         
-                    # 掩膜（放宽以保留完整轮廓）
-                    mask_threshold=0.25,
-                    mask_expand_pixels=10,
+                    # 掩膜
+                    mask_threshold=0.4,
+                    mask_expand_pixels=15,
                         
-                    # 深度过滤（严格，去除远处背景）
-                    use_depth_filter=True,
+                    # 背景平面过滤（去除背景）
+                    use_plane_filter=True,
                         
-                    # 统计和聚类过滤（减少过滤强度）
-                    use_statistical_filter=False,
+                    # 统计和聚类过滤
+                    use_statistical_filter=True,
                     use_cluster_filter=True,
-                    min_cluster_points=30,
+                    min_cluster_points=50,
                         
                     visualize=False,
                     save_results=True,
@@ -115,12 +111,12 @@ class AddressControl(Node):
                             self.get_logger().info(f"  法向量: ({normal[0]}, {normal[1]}, {normal[2]})")
 
                 else:
-                    self.get_logger().warning("分割失败，未检测到目标")
+                    self.get_logger().error("分割失败")
                 
             self.control_pub.publish(control_msg)
         except Exception as e:
             self.error_pub.publish(process)
-            self.get_logger().error('数据处理出现未知错误，取消本次任务')
+            self.get_logger().error(f'数据处理出现错误:{e}，取消本次任务')
             return
 
 

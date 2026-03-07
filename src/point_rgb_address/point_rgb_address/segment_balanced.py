@@ -1,11 +1,8 @@
 import numpy as np
 import open3d as o3d
-import sys
-import os
 from ultralytics import YOLO
 import cv2
 from pathlib import Path
-from PIL import Image
 
 
 
@@ -70,7 +67,7 @@ class PMRCameraCalibration:
     
     def project_3d_to_2d(self, points_3d):
         """
-        将3D点投影到RGB图像平面（带畸变校正）
+        将3D点投影到RGB图像平面
         
         参数:
             points_3d: Nx3的numpy数组，RGB相机坐标系下的3D点
@@ -118,26 +115,74 @@ class BalancedPointCloudSegmentor:
         self.model = YOLO(yolo_model_path)
         self.calib = camera_calib if camera_calib else PMRCameraCalibration(manual_offset_x=-29, manual_offset_y=53)
     
+    def filter_by_tilted_plane(self, points, is_rim_mask):
+        if len(points) < 50:
+            return np.ones(len(points), dtype=bool)
+
+        # 1. 提取背景点用于拟合
+        bg_points = points[is_rim_mask]
+        
+        # 如果边缘点太少，回退方案：使用深度最大的20%点作为背景猜测
+        if len(bg_points) < 20:
+            z_vals = points[:, 2]
+            deep_threshold = np.percentile(z_vals, 80)
+            indices_fitting = np.where(z_vals > deep_threshold)[0]
+            points_fitting = points[indices_fitting]
+            use_fallback = True
+        else:
+            points_fitting = bg_points
+            use_fallback = False
+
+        # 2. RANSAC 平面拟合 (自适应倾斜角度)
+        pcd_bg = o3d.geometry.PointCloud()
+        pcd_bg.points = o3d.utility.Vector3dVector(points_fitting)
+        
+        # distance_threshold: 允许的平面厚度误差 (mm)，设为3.0以容忍天花板噪点
+        plane_model, inliers = pcd_bg.segment_plane(distance_threshold=3.0, ransac_n=3, num_iterations=1000)
+        
+        if len(inliers) < 10:
+            return np.ones(len(points), dtype=bool)
+            
+        [a, b, c, d] = plane_model
+        
+        # 3. 计算所有点到平面的垂直距离
+        # dist = ax + by + cz + d
+        dist_vals = a * points[:, 0] + b * points[:, 1] + c * points[:, 2] + d
+        
+        # 4. 判断保留哪些点
+        # 取背景点的距离中位数作为基准面
+        if use_fallback:
+             bg_ref_val = np.median(dist_vals[indices_fitting])
+        else:
+             bg_ref_val = np.median(dist_vals[is_rim_mask])
+
+        # 保留距离背景平面 2.0mm 以上的点
+        margin = 2.0 
+        
+        if c > 0:
+            keep_mask = dist_vals < (bg_ref_val - margin)
+        else:
+            keep_mask = dist_vals > (bg_ref_val + margin)
+            
+        return keep_mask
+
     def segment_balanced(
         self,
-        rgb_path=None,          # 保持向后兼容
-        pcd_path=None,          # 保持向后兼容
-        rgb_data=None,          # 新增：直接传入图像数据
-        pcd_data=None,          # 新增：直接传入点云数据
+        rgb_path=None,          
+        pcd_path=None,                    
         output_dir="results_balanced",
-        conf_threshold=0.25,
-        # 掩膜
+        conf_threshold=0.7,
+        
+        # 掩膜参数
         mask_threshold=0.4,
-        mask_expand_pixels=5,
-        # 深度过滤（温和）
-        use_depth_filter=True,
-        # 统计过滤
-        use_statistical_filter=True,
-        # 聚类过滤
-        use_cluster_filter=True,
-        min_cluster_points=50,     # 最小簇大小
-        # 可视化
-        visualize=True,
+        mask_expand_pixels=15, 
+        
+        use_plane_filter=True,  # 平面过滤
+        use_statistical_filter=True,    # 统计离群点过滤
+        use_cluster_filter=True,    # 聚类过滤
+        min_cluster_points=50,  #最小簇点数
+        
+        visualize=False,
         save_results=True,
         debug_mode=True
     ):
@@ -145,126 +190,123 @@ class BalancedPointCloudSegmentor:
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True, parents=True)
         
-        
-        
-        pcd_original = o3d.io.read_point_cloud(str(pcd_path))
+        pcd_original = o3d.io.read_point_cloud(str(pcd_path))   # 点云镜头坐标系下的点云对象
         points_left = np.asarray(pcd_original.points)
-        
         image = cv2.imread(str(rgb_path))
-        # OpenCV读取的是BGR格式，转换为RGB供YOLO使用
-        # if image is not None and image.shape[2] == 3:
-        #     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
-        # 2. YOLO推理
+        # YOLO推理
         results = self.model(image, conf=conf_threshold, iou=0.6)
         class_names_dict = self.model.names
         
         if results[0].masks is None:
-            return None
+            raise Exception('分割失败，无掩膜保存')
         
         segmented_clouds = []
+        
+        points_rgb = self.calib.transform_pointcloud_to_rgb(points_left)
+        pixels, valid_projection_mask = self.calib.project_3d_to_2d(points_rgb)
+        
+        # 筛选有效投影点
+        valid_indices = np.where(valid_projection_mask)[0]
+        if len(valid_indices) == 0:
+            raise Exception('无有效投影点')
+        
+        # 获取有效点的整数像素坐标
+        u_valid = pixels[valid_indices, 0].astype(int)
+        v_valid = pixels[valid_indices, 1].astype(int)
+        
+        # 边界检查
+        h, w = image.shape[:2]
+        in_bounds = (u_valid >= 0) & (u_valid < w) & (v_valid >= 0) & (v_valid < h)
+        
+        valid_indices = valid_indices[in_bounds]
+        u_valid = u_valid[in_bounds]
+        v_valid = v_valid[in_bounds]
         
         for idx, mask_tensor in enumerate(results[0].masks.data):
 
             if len(results[0].boxes.cls) > idx:
                 class_id = int(results[0].boxes.cls[idx].cpu().numpy())
-                class_name = class_names_dict[class_id]  # 这是目标类别名称
+                class_name = class_names_dict[class_id]
                 confidence = float(results[0].boxes.conf[idx].cpu().numpy())
             else:
-                class_id = -1
-                class_name = "unknown"
-                confidence = 0.0
+                class_id, class_name, confidence = -1, "unknown", 0.0
             
-            # 3. 处理掩膜
+            # 处理掩膜
             mask_np = mask_tensor.cpu().numpy()
-            mask_resized = cv2.resize(mask_np, (image.shape[1], image.shape[0]))
-            mask_binary = (mask_resized > mask_threshold).astype(np.uint8)
+            mask_resized = cv2.resize(mask_np, (w, h))
             
-            # 适度扩展掩膜
-            if mask_expand_pixels > 0:
-                kernel = np.ones((mask_expand_pixels*2+1, mask_expand_pixels*2+1), np.uint8)
-                mask_binary = cv2.dilate(mask_binary, kernel, iterations=1)
+            # 原始物体掩膜
+            mask_raw_binary = (mask_resized > mask_threshold).astype(np.uint8)
             
+            # 扩张掩膜
+            kernel = np.ones((mask_expand_pixels*2+1, mask_expand_pixels*2+1), np.uint8)
+            mask_dilated_binary = cv2.dilate(mask_raw_binary, kernel, iterations=1)
             
-            # 保存掩膜可视化
-            if debug_mode:
-                mask_colored = np.zeros_like(image)
-                mask_colored[mask_binary > 0] = [0, 255, 0]  # RGB格式的绿色
-                overlay = cv2.addWeighted(image, 0.7, mask_colored, 0.3, 0)
-                # 保存时转回BGR格式（OpenCV保存需要BGR）
-                overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(str(output_dir / f"target_{idx}_mask_overlay.jpg"), overlay_bgr)
+            # 边缘背景区
+            mask_rim_binary = cv2.bitwise_xor(mask_dilated_binary, mask_raw_binary)
             
-            # 4. 投影并初步分割
-            points_rgb = self.calib.transform_pointcloud_to_rgb(points_left)
-            pixels, valid_mask = self.calib.project_3d_to_2d(points_rgb)
+            if debug_mode and save_results:
+                # 可视化掩膜调试图
+                debug_img = image.copy()
+                debug_img[mask_rim_binary > 0] = [0, 0, 255] # 红色是用于拟合平面的Rim
+                debug_img[mask_raw_binary > 0] = [0, 255, 0] # 绿色是物体核心
+                cv2.imwrite(str(output_dir / f"target_{idx}_masks_debug.jpg"), debug_img)
             
-            segmented_indices = []
-            segmented_depths = []
+            # 提取点云索引
+            # 检查点是否在“扩张后”的掩膜内（包含物体+周围一圈天花板）
+            is_in_dilated = mask_dilated_binary[v_valid, u_valid] > 0
+            current_indices = valid_indices[is_in_dilated]
             
-            for i in range(len(points_left)):
-                if not valid_mask[i]:
-                    continue
-                u, v = int(pixels[i, 0]), int(pixels[i, 1])
-                if 0 <= v < image.shape[0] and 0 <= u < image.shape[1]:
-                    if mask_binary[v, u]:
-                        segmented_indices.append(i)
-                        segmented_depths.append(points_rgb[i, 2])
+            if len(current_indices) == 0: continue
             
-            segmented_indices = np.array(segmented_indices)
-            segmented_depths = np.array(segmented_depths)
+            # 标记哪些点属于背景点
+            u_curr = pixels[current_indices, 0].astype(int)
+            v_curr = pixels[current_indices, 1].astype(int)
+            is_rim_point = mask_rim_binary[v_curr, u_curr] > 0
             
+            # 获取当前区域的所有点 (RGB坐标系下)
+            current_points_rgb = points_rgb[current_indices]
             
-            if len(segmented_indices) == 0:
-                continue
+            # 空间平面过滤
+            final_mask = np.ones(len(current_points_rgb), dtype=bool)
             
-            # 5. 深度过滤（保留较近的点，去除远处背景）
-            if use_depth_filter and len(segmented_depths) > 10:
-                
-                # 使用分位数而不是均值，更鲁棒
-                depth_median = np.median(segmented_depths)
-                depth_25 = np.percentile(segmented_depths, 25)
-                depth_75 = np.percentile(segmented_depths, 75)
-                
-                
-                # 只保留较近的点（小于等于中位数的点）
-                # 这样可以去除远处的大圈背景
-                depth_max = depth_median + (depth_75 - depth_25) * 0.5  # 中位数 + 0.5倍IQR
-                
-                
-                depth_mask = segmented_depths <= depth_max
-                segmented_indices = segmented_indices[depth_mask]
-                
+            if use_plane_filter and len(current_points_rgb) > 20:
+                plane_keep_mask = self.filter_by_tilted_plane(
+                    current_points_rgb, 
+                    is_rim_point
+                )
+                final_mask = final_mask & plane_keep_mask
+            
+            # 获取最终保留的原始点云索引
+            segmented_indices = current_indices[final_mask]
             
             if len(segmented_indices) == 0:
                 continue
             
-            # 6. 创建点云
+            # 创建点云
             segmented_points = points_left[segmented_indices]
             pcd_segmented = o3d.geometry.PointCloud()
             pcd_segmented.points = o3d.utility.Vector3dVector(segmented_points)
             
-            # 7. 统计离群点过滤
+            # 统计离群点过滤
             if use_statistical_filter and len(segmented_points) > 50:
                 pcd_segmented, ind = pcd_segmented.remove_statistical_outlier(
-                    nb_neighbors=20, std_ratio=2.0
+                    nb_neighbors=20, std_ratio=1.5 
                 )
                 segmented_points = np.asarray(pcd_segmented.points)
             
-            # 8. 聚类过滤
+            # 聚类过滤
             if use_cluster_filter and len(segmented_points) > min_cluster_points:
                 labels = np.array(pcd_segmented.cluster_dbscan(
-                    eps=8.0, min_points=10, print_progress=False
+                    eps=12.0, min_points=10, print_progress=False
                 ))
                 
                 if len(labels) > 0 and labels.max() >= 0:
                     unique_labels, counts = np.unique(labels[labels >= 0], return_counts=True)
-                    
-                    # 过滤掉太小的簇
                     valid_clusters = unique_labels[counts >= min_cluster_points]
                     
                     if len(valid_clusters) > 0:
-                        
                         # 保留最大的簇
                         largest_cluster_idx = np.argmax(counts[np.isin(unique_labels, valid_clusters)])
                         largest_cluster = valid_clusters[largest_cluster_idx]
@@ -275,8 +317,7 @@ class BalancedPointCloudSegmentor:
                         )
                         segmented_points = np.asarray(pcd_segmented.points)
 
-            
-            # 9. 最终结果
+            # 最终结果
             if len(segmented_points) > 0:
                 pcd_segmented.paint_uniform_color([0.9, 0.9, 0.9])
                 
@@ -284,7 +325,6 @@ class BalancedPointCloudSegmentor:
                 bbox_min = segmented_points.min(axis=0)
                 bbox_max = segmented_points.max(axis=0)
                 bbox_size = bbox_max - bbox_min
-                
                 
                 segmented_clouds.append({
                     'points': segmented_points,
@@ -298,9 +338,7 @@ class BalancedPointCloudSegmentor:
         
         # 保存
         if save_results and len(segmented_clouds) > 0:
-            
             annotated = results[0].plot()
-            # YOLO的plot()返回的是RGB格式，保存时转为BGR
             annotated_bgr = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
             cv2.imwrite(str(output_dir / "yolo_detection.jpg"), annotated_bgr)
             
@@ -309,12 +347,11 @@ class BalancedPointCloudSegmentor:
                 pcd_path = output_dir / f"target_{idx}_balanced.pcd"
                 o3d.io.write_point_cloud(str(pcd_path), seg_cloud['pcd'])
                 
-                # 保存信息
                 info_path = output_dir / f"target_{idx}_info.txt"
                 with open(info_path, 'w', encoding='utf-8') as f:
                     f.write(f"分割结果\n")
                     f.write("=" * 40 + "\n")
-                    f.write(f"类别: {class_name}\n")
+                    f.write(f"类别: {seg_cloud['class_name']}\n")
                     f.write(f"点数: {len(seg_cloud['points'])}\n")
                     f.write(f"中心 (mm): {seg_cloud['center']}\n")
                     f.write(f"尺寸 (mm): {seg_cloud['bbox_size']}\n")
@@ -324,21 +361,21 @@ class BalancedPointCloudSegmentor:
             vis_geometries = []
             
             pcd_vis_original = o3d.geometry.PointCloud(pcd_original)
-            pcd_vis_original.paint_uniform_color([0.7, 0.7, 0.7])
+            pcd_vis_original.paint_uniform_color([0.3, 0.3, 0.3])
             vis_geometries.append(pcd_vis_original)
             
             for seg_cloud in segmented_clouds:
                 pcd_vis = o3d.geometry.PointCloud(seg_cloud['pcd'])
-                pcd_vis.translate([0, 0, 50])
+                pcd_vis.paint_uniform_color([0, 1, 0])
+                pcd_vis.translate([0, 0, 20])
                 vis_geometries.append(pcd_vis)
             
             o3d.visualization.draw_geometries(
                 vis_geometries,
-                window_name="平衡版分割结果",
+                window_name="平衡版分割结果 (倾斜校正)",
                 width=1280,
                 height=720
             )
-        
         
         return segmented_clouds
 
@@ -357,21 +394,20 @@ def main():
         rgb_path=rgb_image,
         pcd_path=pointcloud,
         output_dir=r"/home/ubuntu/fire_jixiebi_ws/src/point_rgb_address/results",
-        conf_threshold=0.25,
+        conf_threshold=0.7,
         
-        # 掩膜（放宽以保留完整轮廓）
-        mask_threshold=0.25,        # 进一步降低阈值
-        mask_expand_pixels=10,      # 增加扩展到10像素
+        # 掩膜
+        mask_threshold=0.4,        
+        mask_expand_pixels=15,      
         
-        # 深度过滤（严格，去除远处背景）
-        use_depth_filter=True,
+        use_plane_filter=True,
         
-        # 统计和聚类过滤（减少过滤强度）
-        use_statistical_filter=False,  # 关闭统计过滤，避免边缘点被误删
+        # 统计和聚类过滤
+        use_statistical_filter=True,  
         use_cluster_filter=True,
-        min_cluster_points=30,      # 降低最小簇大小
+        min_cluster_points=50,      
         
-        visualize=True,
+        visualize=False,
         save_results=True,
         debug_mode=True
     )

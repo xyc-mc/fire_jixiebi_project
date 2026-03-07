@@ -2,27 +2,13 @@ import numpy as np
 import open3d as o3d
 import os
 
-def read_pcd_binary(file_path):
+def read_pcd(file_path):
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"文件未找到: {file_path}")
-        
-    with open(file_path, 'rb') as f:
-        header = []
-        while True:
-            line = f.readline().decode('ascii').strip()
-            header.append(line)
-            if line.startswith('DATA binary'):
-                break
-        
-        points_num = 0
-        for line in header:
-            if line.startswith('POINTS'):
-                points_num = int(line.split()[1])
-        
-        data = f.read()
-        dt = np.dtype([('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('rgb', 'f4')])
-        pc_data = np.frombuffer(data, dtype=dt)[:points_num]
-        return np.stack([pc_data['x'], pc_data['y'], pc_data['z']], axis=1)
+
+    pcd_original = o3d.io.read_point_cloud(str(file_path))
+    points_left = np.asarray(pcd_original.points)
+    return pcd_original, points_left
 
 def fit_circle_2d(p_2d):
     """基于最小二乘法的二维圆拟合"""
@@ -52,9 +38,7 @@ def process_detector(file_path, visualize=True):
     处理点云主函数
     """
     # 1. 加载数据
-    points = read_pcd_binary(file_path)
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd, points = read_pcd(file_path)
 
     # 2. RANSAC 拟合平面 (提取主表面)
     plane_model, inliers = pcd.segment_plane(distance_threshold=1.5,

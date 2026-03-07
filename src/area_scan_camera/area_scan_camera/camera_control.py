@@ -1,8 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import PointCloud2, PointField, Image
 from std_msgs.msg import String
-import struct
 import time
 import sys
 import os
@@ -22,7 +20,6 @@ class AreaScanCameraNode(Node):
         super().__init__('camera_control_node')
         
         # 声明保存路径参数
-
         self.declare_parameter('workspace_dir', '/home/ubuntu/fire_jixiebi_ws')
         self.workspace_dir = self.get_parameter('workspace_dir').value
         self.save_dir = os.path.join(self.workspace_dir, 'src/point_rgb_address/camera_data')
