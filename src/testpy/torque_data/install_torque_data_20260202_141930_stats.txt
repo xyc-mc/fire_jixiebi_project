@@ -1,0 +1,18 @@
+TORQUE DATA STATISTICS
+============================================================
+Data file: torque_data/torque_data_20260202_141930.csv
+Total data points: 8877
+Time range: 18.5 to 905.5 (0.1 sec units)
+Duration: 88.70 seconds
+------------------------------------------------------------
+J2 Joint Torque:
+  Min: 38.0000 Nm
+  Max: 404.0000 Nm
+  Avg: 212.0506 Nm
+  Std: 65.3037 Nm
+
+J3 Joint Torque:
+  Min: -583.0000 Nm
+  Max: -117.0000 Nm
+  Avg: -294.8476 Nm
+  Std: 79.3782 Nm

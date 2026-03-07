@@ -1,0 +1,14 @@
+# 手眼标定参数配置文件
+# 单位：毫米 
+# 标定信息
+handeye_calibration:
+  transformation_matrix:
+  # 4x4变换矩阵（行主序，平移单位为毫米）
+    - [-0.006, 1.000, 0.003 , -117.935]   # 第1行: R00, R01, R02, tx(mm)
+    - [-0.996, -0.005, -0.090, 47.043]    # 第2行: R10, R11, R12, ty(mm)
+    - [-0.090, -0.003, 0.996, -46.017]     # 第3行: R20, R21, R22, tz(mm)
+    - [0.0, 0.0, 0.0, 1.0]     # 第4行: 0,   0,   0,   1
+  calibration_date: "2026-01-22 16:16"
+  calibration_method: "handeye_calibration"
+  notes: "相机安装在机械臂末端"
+  units: "millimeters"

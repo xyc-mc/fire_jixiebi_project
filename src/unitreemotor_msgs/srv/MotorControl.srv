@@ -1,0 +1,16 @@
+# MotorControl.srv
+# 请求部分
+uint8 command              # 命令类型: 0=停止模式 1=位置模式，2=速度模式，3=阻尼模式，4=力矩模式，5=零力矩模式 6=力位混合模式
+float64 value              # 参数值
+float64 duration           # 持续时间(秒)，0=无限
+float64 kp                 # 比例增益
+float64 kd                 # 微分增益
+float64 tau                # 力矩值
+float64 max_velocity       # 最大速度
+float64 max_torque         # 最大力矩
+
+---
+# 响应部分
+bool success               # 是否成功
+string message             # 返回消息
+MotorStatus status         # 当前电机状态

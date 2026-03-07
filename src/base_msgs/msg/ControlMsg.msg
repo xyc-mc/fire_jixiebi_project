@@ -1,0 +1,10 @@
+bool switch_control
+bool complete
+int32 frequency
+string class_name
+float64[3] center
+float64[3] angle
+float64 rotate_angle
+string rotate_direction
+sensor_msgs/PointCloud2 cloud_data
+sensor_msgs/Image image_data
