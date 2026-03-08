@@ -199,7 +199,7 @@ class BalancedPointCloudSegmentor:
         class_names_dict = self.model.names
         
         if results[0].masks is None:
-            raise Exception('分割失败，无掩膜保存')
+            return None
         
         segmented_clouds = []
         
@@ -209,7 +209,7 @@ class BalancedPointCloudSegmentor:
         # 筛选有效投影点
         valid_indices = np.where(valid_projection_mask)[0]
         if len(valid_indices) == 0:
-            raise Exception('无有效投影点')
+            return None
         
         # 获取有效点的整数像素坐标
         u_valid = pixels[valid_indices, 0].astype(int)
