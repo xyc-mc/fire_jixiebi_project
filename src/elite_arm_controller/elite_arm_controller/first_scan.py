@@ -24,6 +24,7 @@ class FirstScan(Node):
         self.publisher = self.create_publisher(PoseStamped, '/move_pose', 10)
         self.control_publisher = self.create_publisher(ControlMsg, '/move_control', 10)
         self.arm_velocity_publisher = self.create_publisher(Float64, '/arm_velocity', 10)
+        
         self.process_pub = self.create_publisher(String, '/process_data', 10)
         self.error_pub = self.create_publisher(String, '/error_data', 10)
 
